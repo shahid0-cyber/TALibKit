@@ -10,7 +10,7 @@ This repo has a GitHub Action that checks daily for new TA-Lib releases, cross-c
 - Latest built release: pending first run
 
 ```swift
-.package(url: "https://github.com/YOUR_GH_USERNAME/TALibKit.git", from: "0.0.0")
+.package(url: "https://github.com/shahid0-cyber/TALibKit.git", from: "0.0.0")
 ```
 <!-- AUTO-UPDATE:END -->
 
@@ -20,6 +20,6 @@ Add this package in Xcode via File > Add Packages, or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/YOUR_GH_USERNAME/TALibKit.git", from: "0.7.1")
+    .package(url: "https://github.com/shahid0-cyber/TALibKit.git", from: "0.7.1")
 ]
 ```
