@@ -38,9 +38,16 @@ build_for_platform() {
     macosx) min_flag="-mmacosx-version-min=$minver" ;;
   esac
 
-  echo ">> Building for $sdk / $arch"
-  local cc="xcrun -sdk $sdk clang"
-  local cflags="-arch $arch -isysroot $sdk_path $min_flag -fembed-bitcode -O2"
+  echo ">> Building for $sdk / $arch" >&2
+  local cc=(xcrun -sdk "$sdk" clang)
+  local cflags=(-arch "$arch" -isysroot "$sdk_path" "$min_flag" -fembed-bitcode -O2)
+  local includes=(
+    -I"$SRC_DIR/include"
+    -I"$SRC_DIR/src/ta_common"
+    -I"$SRC_DIR/src/ta_func"
+    -I"$SRC_DIR/src/ta_abstract"
+    -I"$SRC_DIR/src/ta_abstract/frames"
+  )
 
   find "$SRC_DIR/src/ta_func" -name "*.c" > "$build_dir/sources.txt"
   find "$SRC_DIR/src/ta_common" -name "*.c" >> "$build_dir/sources.txt"
@@ -51,7 +58,7 @@ build_for_platform() {
 
   while read -r src; do
     obj="$obj_dir/$(basename "${src%.c}").o"
-    $cc $cflags -I"$SRC_DIR/include" -c "$src" -o "$obj"
+    "${cc[@]}" "${cflags[@]}" "${includes[@]}" -c "$src" -o "$obj"
   done < "$build_dir/sources.txt"
 
   local lib_path="$build_dir/libta-lib.a"
