@@ -9,6 +9,11 @@ on:
         description: 'TA-Lib version tag to build (for example v0.7.1). Leave empty to auto-detect latest.'
         required: false
         type: string
+      force_rebuild:
+        description: 'Rebuild even if the current TALibKit version is already packaged.'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -64,10 +69,11 @@ jobs:
         env:
           LATEST: ${{ steps.resolve.outputs.latest }}
           CURRENT: ${{ steps.current.outputs.current }}
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$LATEST" != "$CURRENT" ]; then
+          if [ "${FORCE_REBUILD:-false}" = "true" ] || [ "$LATEST" != "$CURRENT" ]; then
             echo 'should_build=true' >> "$GITHUB_OUTPUT"
           else
             echo 'should_build=false' >> "$GITHUB_OUTPUT"
@@ -113,14 +119,6 @@ jobs:
           checksum="$(swift package compute-checksum talib_build/out/TALibKit.xcframework.zip)"
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
 
-      - name: Create or update GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TALIB_VERSION }}
-          name: TALibKit ${{ env.TALIB_VERSION }}
-          files: talib_build/out/TALibKit.xcframework.zip
-          body: Auto-built XCFramework wrapping TA-Lib ${{ env.TALIB_VERSION }}.
-
       - name: Update Package.swift and VERSION.txt
         env:
           ASSET_URL: ${{ format('https://github.com/{0}/releases/download/{1}/TALibKit.xcframework.zip', github.repository, needs.check-version.outputs.latest) }}
@@ -132,11 +130,22 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import os
+          import re
 
           package_path = Path('Package.swift')
           content = package_path.read_text()
-          content = content.replace('TALIB_XCFRAMEWORK_URL_PLACEHOLDER', os.environ['ASSET_URL'])
-          content = content.replace('TALIB_XCFRAMEWORK_CHECKSUM_PLACEHOLDER', os.environ['CHECKSUM'])
+          content = re.sub(
+              r'url:\s*"[^"]*"',
+              f'url: "{os.environ["ASSET_URL"]}"',
+              content,
+              count=1,
+          )
+          content = re.sub(
+              r'checksum:\s*"[^"]*"',
+              f'checksum: "{os.environ["CHECKSUM"]}"',
+              content,
+              count=1,
+          )
           package_path.write_text(content)
           Path('VERSION.txt').write_text(os.environ['TALIB_VERSION'] + '\n')
           PY
@@ -158,7 +167,22 @@ jobs:
           git add README.md VERSION.txt Package.swift
           if git diff --cached --quiet; then
             echo 'No metadata changes to commit'
-            exit 0
+          else
+            git commit -m "chore: update TALibKit to ${TALIB_VERSION}"
+            git push
           fi
-          git commit -m "chore: update TALibKit to ${TALIB_VERSION}"
-          git push
+
+      - name: Update release tag to packaged commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag -f "$TALIB_VERSION" HEAD
+          git push origin "refs/tags/$TALIB_VERSION" --force
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TALIB_VERSION }}
+          name: TALibKit ${{ env.TALIB_VERSION }}
+          files: talib_build/out/TALibKit.xcframework.zip
+          body: Auto-built XCFramework wrapping TA-Lib ${{ env.TALIB_VERSION }}.
