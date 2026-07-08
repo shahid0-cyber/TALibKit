@@ -2,12 +2,13 @@ name: Build and Publish TALibKit
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # daily check for new TA-Lib release
+    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       version:
         description: "TA-Lib version tag to build (e.g. v0.7.1). Leave empty to auto-detect latest."
         required: false
+        type: string
 
 permissions:
   contents: write
@@ -24,11 +25,13 @@ jobs:
 
       - name: Get latest TA-Lib release
         id: get
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
             echo "latest=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
           else
-            LATEST=$(curl -s https://api.github.com/repos/TA-Lib/ta-lib/releases/latest | jq -r .tag_name)
+            LATEST=$(gh release view --repo TA-Lib/ta-lib --json tagName -q .tagName)
             echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
           fi
 
@@ -53,14 +56,23 @@ jobs:
   build:
     needs: check-version
     if: needs.check-version.outputs.should_build == 'true'
-    runs-on: macos-14
+    runs-on: macos-26
     env:
       TALIB_VERSION: ${{ needs.check-version.outputs.latest }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Show toolchain versions
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          node --version
 
       - name: Build XCFramework
         run: |
@@ -74,7 +86,6 @@ jobs:
           echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release with asset
-        id: release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TALIB_VERSION }}
@@ -83,23 +94,25 @@ jobs:
           body: "Auto-built XCFramework wrapping TA-Lib ${{ env.TALIB_VERSION }}."
 
       - name: Update Package.swift
+        env:
+          ASSET_URL: https://github.com/${{ github.repository }}/releases/download/${{ env.TALIB_VERSION }}/TALibKit.xcframework.zip
+          CHECKSUM: ${{ steps.checksum.outputs.checksum }}
         run: |
-          ASSET_URL="https://github.com/${{ github.repository }}/releases/download/${TALIB_VERSION}/TALibKit.xcframework.zip"
-          CHECKSUM="${{ steps.checksum.outputs.checksum }}"
-          sed -i.bak "s#TALIB_XCFRAMEWORK_URL_PLACEHOLDER#$ASSET_URL#g" Package.swift
-          sed -i.bak "s#TALIB_XCFRAMEWORK_CHECKSUM_PLACEHOLDER#$CHECKSUM#g" Package.swift
-          # reset placeholders back for next run isn't needed; we regenerate from template
-          rm -f Package.swift.bak
+          python3 - <<'PY'
+from pathlib import Path
+import os
+content = Path('Package.swift').read_text()
+content = content.replace('TALIB_XCFRAMEWORK_URL_PLACEHOLDER', os.environ['ASSET_URL'])
+content = content.replace('TALIB_XCFRAMEWORK_CHECKSUM_PLACEHOLDER', os.environ['CHECKSUM'])
+Path('Package.swift').write_text(content)
+PY
           echo "$TALIB_VERSION" > VERSION.txt
 
       - name: Update README with new version/link
+        env:
+          ASSET_URL: https://github.com/${{ github.repository }}/releases/download/${{ env.TALIB_VERSION }}/TALibKit.xcframework.zip
         run: |
-          ASSET_URL="https://github.com/${{ github.repository }}/releases/download/${TALIB_VERSION}/TALibKit.xcframework.zip"
-          python3 scripts/update_readme.py "$TALIB_VERSION" "$ASSET_URL"
-
-      - name: Regenerate Package.swift template for next run
-        run: |
-          python3 scripts/reset_package_template.py
+          python3 scripts/update_readme.py "$TALIB_VERSION" "$ASSET_URL" "${{ github.repository }}"
 
       - name: Commit updated files
         run: |
