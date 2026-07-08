@@ -18,8 +18,8 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "TALibKit",
-            url: "TALIB_XCFRAMEWORK_URL_PLACEHOLDER",
-            checksum: "TALIB_XCFRAMEWORK_CHECKSUM_PLACEHOLDER"
+            url: "https://github.com/shahid0-cyber/TALibKit/releases/download/v0.7.1/TALibKit.xcframework.zip",
+            checksum: "d092ae2a62b9dafdd0e5e87f59af978a112b4e841a886830a4e0ceea6d3633eb"
         )
     ]
 )
