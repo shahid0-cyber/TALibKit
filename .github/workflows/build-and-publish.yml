@@ -2,65 +2,87 @@ name: Build and Publish TALibKit
 
 on:
   schedule:
-    - cron: "0 6 * * *"
+    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       version:
-        description: "TA-Lib version tag to build (e.g. v0.7.1). Leave empty to auto-detect latest."
+        description: 'TA-Lib version tag to build (for example v0.7.1). Leave empty to auto-detect latest.'
         required: false
         type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: talibkit-release
+  cancel-in-progress: false
+
 jobs:
   check-version:
     runs-on: ubuntu-latest
     outputs:
-      latest: ${{ steps.get.outputs.latest }}
+      latest: ${{ steps.resolve.outputs.latest }}
       current: ${{ steps.current.outputs.current }}
       should_build: ${{ steps.compare.outputs.should_build }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Get latest TA-Lib release
-        id: get
+      - name: Resolve target TA-Lib version
+        id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        shell: bash
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "latest=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            latest="$INPUT_VERSION"
           else
-            LATEST=$(gh release view --repo TA-Lib/ta-lib --json tagName -q .tagName)
-            echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+            latest="$(gh release view --repo TA-Lib/ta-lib --json tagName -q .tagName)"
           fi
+          if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+            echo "Failed to resolve TA-Lib version" >&2
+            exit 1
+          fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
-      - name: Get current pinned version
+      - name: Read current packaged version
         id: current
+        shell: bash
         run: |
+          set -euo pipefail
           if [ -f VERSION.txt ]; then
-            echo "current=$(cat VERSION.txt)" >> "$GITHUB_OUTPUT"
+            current="$(tr -d '\r\n' < VERSION.txt)"
           else
-            echo "current=none" >> "$GITHUB_OUTPUT"
+            current='none'
           fi
+          echo "current=$current" >> "$GITHUB_OUTPUT"
 
       - name: Compare versions
         id: compare
+        env:
+          LATEST: ${{ steps.resolve.outputs.latest }}
+          CURRENT: ${{ steps.current.outputs.current }}
+        shell: bash
         run: |
-          if [ "${{ steps.get.outputs.latest }}" != "${{ steps.current.outputs.current }}" ]; then
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [ "$LATEST" != "$CURRENT" ]; then
+            echo 'should_build=true' >> "$GITHUB_OUTPUT"
           else
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo 'should_build=false' >> "$GITHUB_OUTPUT"
           fi
 
   build:
+    name: Build and release
     needs: check-version
-    if: needs.check-version.outputs.should_build == 'true'
+    if: ${{ needs.check-version.outputs.should_build == 'true' }}
     runs-on: macos-26
     env:
       TALIB_VERSION: ${{ needs.check-version.outputs.latest }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Node 24
         uses: actions/setup-node@v4
@@ -68,56 +90,75 @@ jobs:
           node-version: '24'
 
       - name: Show toolchain versions
+        shell: bash
         run: |
+          set -euo pipefail
           sw_vers
           xcodebuild -version
           swift --version
           node --version
 
       - name: Build XCFramework
+        shell: bash
         run: |
+          set -euo pipefail
           chmod +x scripts/build_xcframework.sh
           ./scripts/build_xcframework.sh "$TALIB_VERSION"
 
       - name: Compute checksum
         id: checksum
+        shell: bash
         run: |
-          CHECKSUM=$(swift package compute-checksum talib_build/out/TALibKit.xcframework.zip)
-          echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          checksum="$(swift package compute-checksum talib_build/out/TALibKit.xcframework.zip)"
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release with asset
+      - name: Create or update GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TALIB_VERSION }}
-          name: "TALibKit ${{ env.TALIB_VERSION }}"
+          name: TALibKit ${{ env.TALIB_VERSION }}
           files: talib_build/out/TALibKit.xcframework.zip
-          body: "Auto-built XCFramework wrapping TA-Lib ${{ env.TALIB_VERSION }}."
+          body: Auto-built XCFramework wrapping TA-Lib ${{ env.TALIB_VERSION }}.
 
-      - name: Update Package.swift
+      - name: Update Package.swift and VERSION.txt
         env:
-          ASSET_URL: https://github.com/${{ github.repository }}/releases/download/${{ env.TALIB_VERSION }}/TALibKit.xcframework.zip
+          ASSET_URL: ${{ format('https://github.com/{0}/releases/download/{1}/TALibKit.xcframework.zip', github.repository, needs.check-version.outputs.latest) }}
           CHECKSUM: ${{ steps.checksum.outputs.checksum }}
+          TALIB_VERSION: ${{ env.TALIB_VERSION }}
+        shell: bash
         run: |
+          set -euo pipefail
           python3 - <<'PY'
-from pathlib import Path
-import os
-content = Path('Package.swift').read_text()
-content = content.replace('TALIB_XCFRAMEWORK_URL_PLACEHOLDER', os.environ['ASSET_URL'])
-content = content.replace('TALIB_XCFRAMEWORK_CHECKSUM_PLACEHOLDER', os.environ['CHECKSUM'])
-Path('Package.swift').write_text(content)
-PY
-          echo "$TALIB_VERSION" > VERSION.txt
+          from pathlib import Path
+          import os
 
-      - name: Update README with new version/link
+          package_path = Path('Package.swift')
+          content = package_path.read_text()
+          content = content.replace('TALIB_XCFRAMEWORK_URL_PLACEHOLDER', os.environ['ASSET_URL'])
+          content = content.replace('TALIB_XCFRAMEWORK_CHECKSUM_PLACEHOLDER', os.environ['CHECKSUM'])
+          package_path.write_text(content)
+          Path('VERSION.txt').write_text(os.environ['TALIB_VERSION'] + '\n')
+          PY
+
+      - name: Update README with new version and link
         env:
-          ASSET_URL: https://github.com/${{ github.repository }}/releases/download/${{ env.TALIB_VERSION }}/TALibKit.xcframework.zip
+          ASSET_URL: ${{ format('https://github.com/{0}/releases/download/{1}/TALibKit.xcframework.zip', github.repository, needs.check-version.outputs.latest) }}
+        shell: bash
         run: |
+          set -euo pipefail
           python3 scripts/update_readme.py "$TALIB_VERSION" "$ASSET_URL" "${{ github.repository }}"
 
-      - name: Commit updated files
+      - name: Commit and push metadata updates
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add README.md VERSION.txt Package.swift
-          git commit -m "chore: update TALibKit to ${TALIB_VERSION}" || echo "No changes to commit"
+          if git diff --cached --quiet; then
+            echo 'No metadata changes to commit'
+            exit 0
+          fi
+          git commit -m "chore: update TALibKit to ${TALIB_VERSION}"
           git push
