@@ -7,7 +7,7 @@ readme_path = Path("README.md")
 text = readme_path.read_text() if readme_path.exists() else ""
 
 badge_line = f"![TA-Lib version](https://img.shields.io/badge/TA--Lib-{version}-blue)"
-dep_block = f""".package(url: "https://github.com/YOUR_GH_USERNAME/TALibKit.git", from: "{version.lstrip('v')}")"""
+dep_block = f""".package(url: "https://github.com/shahid0-cyber/TALibKit.git", from: "{version.lstrip('v')}")"""
 download_line = f"- Latest built release: [{version}]({url})"
 
 marker_start = "<!-- AUTO-UPDATE:START -->"
