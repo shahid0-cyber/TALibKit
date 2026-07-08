@@ -1,0 +1,110 @@
+name: Build and Publish TALibKit
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily check for new TA-Lib release
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "TA-Lib version tag to build (e.g. v0.7.1). Leave empty to auto-detect latest."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      latest: ${{ steps.get.outputs.latest }}
+      current: ${{ steps.current.outputs.current }}
+      should_build: ${{ steps.compare.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get latest TA-Lib release
+        id: get
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "latest=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            LATEST=$(curl -s https://api.github.com/repos/TA-Lib/ta-lib/releases/latest | jq -r .tag_name)
+            echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get current pinned version
+        id: current
+        run: |
+          if [ -f VERSION.txt ]; then
+            echo "current=$(cat VERSION.txt)" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=none" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compare versions
+        id: compare
+        run: |
+          if [ "${{ steps.get.outputs.latest }}" != "${{ steps.current.outputs.current }}" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: macos-14
+    env:
+      TALIB_VERSION: ${{ needs.check-version.outputs.latest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Build XCFramework
+        run: |
+          chmod +x scripts/build_xcframework.sh
+          ./scripts/build_xcframework.sh "$TALIB_VERSION"
+
+      - name: Compute checksum
+        id: checksum
+        run: |
+          CHECKSUM=$(swift package compute-checksum talib_build/out/TALibKit.xcframework.zip)
+          echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release with asset
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TALIB_VERSION }}
+          name: "TALibKit ${{ env.TALIB_VERSION }}"
+          files: talib_build/out/TALibKit.xcframework.zip
+          body: "Auto-built XCFramework wrapping TA-Lib ${{ env.TALIB_VERSION }}."
+
+      - name: Update Package.swift
+        run: |
+          ASSET_URL="https://github.com/${{ github.repository }}/releases/download/${TALIB_VERSION}/TALibKit.xcframework.zip"
+          CHECKSUM="${{ steps.checksum.outputs.checksum }}"
+          sed -i.bak "s#TALIB_XCFRAMEWORK_URL_PLACEHOLDER#$ASSET_URL#g" Package.swift
+          sed -i.bak "s#TALIB_XCFRAMEWORK_CHECKSUM_PLACEHOLDER#$CHECKSUM#g" Package.swift
+          # reset placeholders back for next run isn't needed; we regenerate from template
+          rm -f Package.swift.bak
+          echo "$TALIB_VERSION" > VERSION.txt
+
+      - name: Update README with new version/link
+        run: |
+          ASSET_URL="https://github.com/${{ github.repository }}/releases/download/${TALIB_VERSION}/TALibKit.xcframework.zip"
+          python3 scripts/update_readme.py "$TALIB_VERSION" "$ASSET_URL"
+
+      - name: Regenerate Package.swift template for next run
+        run: |
+          python3 scripts/reset_package_template.py
+
+      - name: Commit updated files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md VERSION.txt Package.swift
+          git commit -m "chore: update TALibKit to ${TALIB_VERSION}" || echo "No changes to commit"
+          git push
