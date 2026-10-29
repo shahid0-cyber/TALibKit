@@ -29,11 +29,22 @@ concurrency:
 jobs:
   check-version:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
     outputs:
       latest: ${{ steps.resolve.outputs.latest }}
       current: ${{ steps.current.outputs.current }}
       should_build: ${{ steps.compare.outputs.should_build }}
     steps:
+      # GitHub disables scheduled workflows after 60 days without repo activity.
+      # Re-enabling via the API keeps the daily check alive between TA-Lib releases.
+      - name: Keep daily schedule enabled
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/build-and-publish.yml/enable"
+
       - name: Checkout
         uses: actions/checkout@v4
 
