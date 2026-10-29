@@ -111,6 +111,10 @@ jobs:
           chmod +x scripts/build_xcframework.sh
           ./scripts/build_xcframework.sh "$TALIB_VERSION"
 
+      - name: Smoke test XCFramework from Swift
+        shell: bash
+        run: swift run --package-path scripts/smoke
+
       - name: Compute checksum
         id: checksum
         shell: bash
