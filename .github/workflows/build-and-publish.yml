@@ -14,6 +14,10 @@ on:
         required: false
         default: false
         type: boolean
+      notes:
+        description: 'Optional text added to the release notes, e.g. why this version was rebuilt.'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -123,6 +127,18 @@ jobs:
           checksum="$(swift package compute-checksum talib_build/out/TALibKit.xcframework.zip)"
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
 
+      - name: Write release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKSUM: ${{ steps.checksum.outputs.checksum }}
+          EXTRA_NOTES: ${{ github.event.inputs.notes }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$TALIB_VERSION" --repo TA-Lib/ta-lib --json body -q .body \
+            | python3 scripts/release_notes.py "$TALIB_VERSION" "$CHECKSUM" "$GITHUB_REPOSITORY" "$EXTRA_NOTES" \
+            > talib_build/release_notes.md
+
       - name: Update Package.swift and VERSION.txt
         env:
           ASSET_URL: ${{ format('https://github.com/{0}/releases/download/{1}/TALibKit.xcframework.zip', github.repository, needs.check-version.outputs.latest) }}
@@ -189,4 +205,4 @@ jobs:
           tag_name: ${{ env.TALIB_VERSION }}
           name: TALibKit ${{ env.TALIB_VERSION }}
           files: talib_build/out/TALibKit.xcframework.zip
-          body: Auto-built XCFramework wrapping TA-Lib ${{ env.TALIB_VERSION }}.
+          body_path: talib_build/release_notes.md
