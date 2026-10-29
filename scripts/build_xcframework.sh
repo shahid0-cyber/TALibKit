@@ -7,6 +7,7 @@ WORKDIR="$(pwd)/talib_build"
 SRC_DIR="$WORKDIR/src"
 OUT_DIR="$WORKDIR/out"
 XCFRAMEWORK_NAME="TALibKit.xcframework"
+JOBS="$(sysctl -n hw.ncpu)"
 
 rm -rf "$WORKDIR"
 mkdir -p "$SRC_DIR" "$OUT_DIR"
@@ -14,84 +15,78 @@ mkdir -p "$SRC_DIR" "$OUT_DIR"
 echo ">> Cloning TA-Lib $TALIB_VERSION"
 git clone --depth 1 --branch "$TALIB_VERSION" https://github.com/TA-Lib/ta-lib.git "$SRC_DIR"
 
-# Platform/arch matrix: sdk|arch|min-version
-PLATFORMS=(
-  "iphoneos|arm64|13.0"
-  "iphonesimulator|arm64|13.0"
-  "iphonesimulator|x86_64|13.0"
-  "macosx|arm64|11.0"
-  "macosx|x86_64|11.0"
+# One XCFramework slice per SDK: "sdk|clang target triples".
+# Deployment targets match the platforms in Package.swift.
+SLICES=(
+  "iphoneos|arm64-apple-ios13.0"
+  "iphonesimulator|arm64-apple-ios13.0-simulator x86_64-apple-ios13.0-simulator"
+  "macosx|arm64-apple-macos11.0 x86_64-apple-macos11.0"
+  "appletvos|arm64-apple-tvos13.0"
+  "appletvsimulator|arm64-apple-tvos13.0-simulator x86_64-apple-tvos13.0-simulator"
+  "watchos|arm64_32-apple-watchos6.0 arm64-apple-watchos6.0"
+  "watchsimulator|arm64-apple-watchos6.0-simulator x86_64-apple-watchos6.0-simulator"
 )
 
-build_for_platform() {
-  local sdk="$1" arch="$2" minver="$3"
-  local build_dir="$WORKDIR/build_${sdk}_${arch}"
-  mkdir -p "$build_dir"
+SOURCES=()
+while IFS= read -r src; do SOURCES+=("$src"); done < <(
+  find "$SRC_DIR/src/ta_func" "$SRC_DIR/src/ta_common" "$SRC_DIR/src/ta_abstract" -name '*.c' | sort
+)
 
-  local sdk_path
-  sdk_path=$(xcrun --sdk "$sdk" --show-sdk-path)
+INCLUDES=(
+  -I"$SRC_DIR/include"
+  -I"$SRC_DIR/src/ta_common"
+  -I"$SRC_DIR/src/ta_func"
+  -I"$SRC_DIR/src/ta_abstract"
+  -I"$SRC_DIR/src/ta_abstract/frames"
+)
 
-  local min_flag
-  case "$sdk" in
-    iphoneos) min_flag="-mios-version-min=$minver" ;;
-    iphonesimulator) min_flag="-mios-simulator-version-min=$minver" ;;
-    macosx) min_flag="-mmacosx-version-min=$minver" ;;
-  esac
+# Compiles every triple of an SDK and merges them into one static library.
+build_slice() {
+  local sdk="$1" triples="$2"
+  local slice_dir="$WORKDIR/build/$sdk"
+  local cc sdk_path triple
+  cc="$(xcrun --sdk "$sdk" --find clang)"
+  sdk_path="$(xcrun --sdk "$sdk" --show-sdk-path)"
 
-  echo ">> Building for $sdk / $arch" >&2
-  local cc=(xcrun -sdk "$sdk" clang)
-  local cflags=(-arch "$arch" -isysroot "$sdk_path" "$min_flag" -fembed-bitcode -O2)
-  local includes=(
-    -I"$SRC_DIR/include"
-    -I"$SRC_DIR/src/ta_common"
-    -I"$SRC_DIR/src/ta_func"
-    -I"$SRC_DIR/src/ta_abstract"
-    -I"$SRC_DIR/src/ta_abstract/frames"
-  )
+  local libs=()
+  for triple in $triples; do
+    echo ">> Building $triple" >&2
+    local obj_dir="$slice_dir/$triple"
+    mkdir -p "$obj_dir"
+    (cd "$obj_dir" && printf '%s\0' "${SOURCES[@]}" |
+      xargs -0 -n 32 -P "$JOBS" "$cc" -target "$triple" -isysroot "$sdk_path" -O2 "${INCLUDES[@]}" -c)
+    xcrun --sdk "$sdk" libtool -static -o "$obj_dir/libta-lib.a" "$obj_dir"/*.o
+    libs+=("$obj_dir/libta-lib.a")
+  done
 
-  find "$SRC_DIR/src/ta_func" -name "*.c" > "$build_dir/sources.txt"
-  find "$SRC_DIR/src/ta_common" -name "*.c" >> "$build_dir/sources.txt"
-  find "$SRC_DIR/src/ta_abstract" -name "*.c" >> "$build_dir/sources.txt" 2>/dev/null || true
-
-  local obj_dir="$build_dir/obj"
-  mkdir -p "$obj_dir"
-
-  while read -r src; do
-    obj="$obj_dir/$(basename "${src%.c}").o"
-    "${cc[@]}" "${cflags[@]}" "${includes[@]}" -c "$src" -o "$obj"
-  done < "$build_dir/sources.txt"
-
-  local lib_path="$build_dir/libta-lib.a"
-  xcrun -sdk "$sdk" libtool -static -o "$lib_path" "$obj_dir"/*.o
-
-  echo "$lib_path"
+  lipo -create "${libs[@]}" -output "$slice_dir/libta-lib.a"
+  echo "$slice_dir/libta-lib.a"
 }
 
-LIB_IOS_DEVICE=$(build_for_platform "iphoneos" "arm64" "13.0")
-
-LIB_SIM_ARM64=$(build_for_platform "iphonesimulator" "arm64" "13.0")
-LIB_SIM_X86_64=$(build_for_platform "iphonesimulator" "x86_64" "13.0")
-SIM_UNIVERSAL="$WORKDIR/libta-lib-sim-universal.a"
-lipo -create "$LIB_SIM_ARM64" "$LIB_SIM_X86_64" -output "$SIM_UNIVERSAL"
-
-LIB_MAC_ARM64=$(build_for_platform "macosx" "arm64" "11.0")
-LIB_MAC_X86_64=$(build_for_platform "macosx" "x86_64" "11.0")
-MAC_UNIVERSAL="$WORKDIR/libta-lib-mac-universal.a"
-lipo -create "$LIB_MAC_ARM64" "$LIB_MAC_X86_64" -output "$MAC_UNIVERSAL"
-
+# The module map lets Swift `import TALibKit` and call the C API directly.
+# It sits in a TALibKit/ subfolder so it can't clash with other XCFrameworks'
+# headers, which Xcode copies into one shared include directory.
 HEADERS_DIR="$WORKDIR/headers"
-mkdir -p "$HEADERS_DIR"
-cp "$SRC_DIR"/include/*.h "$HEADERS_DIR"/
+mkdir -p "$HEADERS_DIR/TALibKit"
+cp "$SRC_DIR"/include/*.h "$HEADERS_DIR/TALibKit/"
+cat > "$HEADERS_DIR/TALibKit/module.modulemap" <<'EOF'
+module TALibKit {
+    umbrella header "ta_libc.h"
+    export *
+}
+EOF
+
+XCFRAMEWORK_ARGS=()
+for slice in "${SLICES[@]}"; do
+  lib="$(build_slice "${slice%%|*}" "${slice#*|}")"
+  XCFRAMEWORK_ARGS+=(-library "$lib" -headers "$HEADERS_DIR")
+done
 
 echo ">> Creating XCFramework"
-xcodebuild -create-xcframework \
-  -library "$LIB_IOS_DEVICE" -headers "$HEADERS_DIR" \
-  -library "$SIM_UNIVERSAL" -headers "$HEADERS_DIR" \
-  -library "$MAC_UNIVERSAL" -headers "$HEADERS_DIR" \
-  -output "$OUT_DIR/$XCFRAMEWORK_NAME"
+xcodebuild -create-xcframework "${XCFRAMEWORK_ARGS[@]}" -output "$OUT_DIR/$XCFRAMEWORK_NAME"
 
 cd "$OUT_DIR"
-zip -r "${XCFRAMEWORK_NAME}.zip" "$XCFRAMEWORK_NAME"
+zip -qr "${XCFRAMEWORK_NAME}.zip" "$XCFRAMEWORK_NAME"
 
 echo ">> Done: $OUT_DIR/${XCFRAMEWORK_NAME}.zip"
 echo ">> Checksum:"
